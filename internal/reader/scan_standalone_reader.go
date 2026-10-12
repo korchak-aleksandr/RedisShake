@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"RedisShake/internal/client"
@@ -18,6 +19,8 @@ import (
 	"RedisShake/internal/log"
 	"RedisShake/internal/rdb/types"
 	"RedisShake/internal/utils"
+
+	"github.com/dustin/go-humanize"
 )
 
 type ScanReaderOptions struct {
@@ -57,6 +60,11 @@ type scanStandaloneReader struct {
 	subWG           sync.WaitGroup
 	isValkey        bool
 
+	// Connections to the source, kept to report their traffic.
+	subscribeClient atomic.Pointer[client.Redis]
+	scanClient      atomic.Pointer[client.Redis]
+	dumpClientStat  atomic.Pointer[client.Redis]
+
 	stat struct {
 		Name              string `json:"name"`
 		ScanFinished      bool   `json:"scan_finished"`
@@ -64,6 +72,12 @@ type scanStandaloneReader struct {
 		ScanCursor        uint64 `json:"scan_cursor"`
 		ScanPercentByDbId string `json:"scan_percent"`
 		NeedUpdateCount   int64  `json:"need_update_count"`
+		ScanCount         int64  `json:"scan_count"`
+		InBytes           struct {
+			Subscribe int64 `json:"subscribe"`
+			Scan      int64 `json:"scan"`
+			Dump      int64 `json:"dump"`
+		} `json:"in_bytes"` // bytes received from the source on each connection
 	}
 }
 
@@ -96,6 +110,7 @@ func (r *scanStandaloneReader) StartRead(ctx context.Context) []chan *entry.Entr
 
 func (r *scanStandaloneReader) subscribe() {
 	c := client.NewRedisClient(r.ctx, r.opts.Address, r.opts.Username, r.opts.Password, r.opts.Tls, r.opts.TlsConfig, r.opts.PreferReplica)
+	r.subscribeClient.Store(c)
 	log.Infof("[%s] scanStandaloneReader subscribe started. dbs=[%v]", r.stat.Name, r.dbs)
 	if len(r.dbs) == 0 {
 		c.Send("psubscribe", "__keyevent@*__:*")
@@ -214,6 +229,7 @@ func parseKeyEvent(resp interface{}) (event keyEvent, ok bool, err error) {
 
 func (r *scanStandaloneReader) scan() {
 	c := client.NewRedisClient(r.ctx, r.opts.Address, r.opts.Username, r.opts.Password, r.opts.Tls, r.opts.TlsConfig, r.opts.PreferReplica)
+	r.scanClient.Store(c)
 	defer c.Close()
 	dbs := r.dbs
 	if len(r.dbs) == 0 {
@@ -268,6 +284,7 @@ func (r *scanStandaloneReader) scan() {
 func (r *scanStandaloneReader) dump() {
 	nowDbId := 0
 	r.dumpClient = client.NewRedisClient(r.ctx, r.opts.Address, r.opts.Username, r.opts.Password, r.opts.Tls, r.opts.TlsConfig, r.opts.PreferReplica)
+	r.dumpClientStat.Store(r.dumpClient)
 	r.isValkey = r.dumpClient.IsValkey()
 	log.Infof("[%s] detected server type: %s", r.stat.Name, map[bool]string{true: "Valkey", false: "Redis"}[r.isValkey])
 	// Support prefer_replica=true in both Cluster and Standalone mode
@@ -414,14 +431,31 @@ func (r *scanStandaloneReader) restore() {
 }
 
 func (r *scanStandaloneReader) Status() interface{} {
-	return r.stat
+	stat := r.stat
+	stat.ScanCount = int64(r.opts.Count)
+	stat.InBytes.Subscribe = bytesRead(&r.subscribeClient)
+	stat.InBytes.Scan = bytesRead(&r.scanClient)
+	stat.InBytes.Dump = bytesRead(&r.dumpClientStat)
+	return stat
+}
+
+// bytesRead returns the bytes received by the client, or 0 if it is not connected yet.
+func bytesRead(c *atomic.Pointer[client.Redis]) int64 {
+	if redis := c.Load(); redis != nil {
+		return redis.BytesRead()
+	}
+	return 0
 }
 
 func (r *scanStandaloneReader) StatusString() string {
+	traffic := fmt.Sprintf("scan_count=[%d], in_bytes=[sub %s, scan %s, dump %s]", r.opts.Count,
+		humanize.IBytes(uint64(bytesRead(&r.subscribeClient))),
+		humanize.IBytes(uint64(bytesRead(&r.scanClient))),
+		humanize.IBytes(uint64(bytesRead(&r.dumpClientStat))))
 	if r.stat.ScanFinished {
-		return fmt.Sprintf("need_update_count=[%d]", r.stat.NeedUpdateCount)
+		return fmt.Sprintf("need_update_count=[%d], %s", r.stat.NeedUpdateCount, traffic)
 	}
-	return fmt.Sprintf("scan_dbid=[%d], scan_percent=[%s], need_update_count=[%d]", r.stat.ScanDbId, r.stat.ScanPercentByDbId, r.stat.NeedUpdateCount)
+	return fmt.Sprintf("scan_dbid=[%d], scan_percent=[%s], need_update_count=[%d], %s", r.stat.ScanDbId, r.stat.ScanPercentByDbId, r.stat.NeedUpdateCount, traffic)
 }
 
 func (r *scanStandaloneReader) StatusConsistent() bool {

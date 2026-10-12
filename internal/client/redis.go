@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"RedisShake/internal/client/proto"
@@ -18,7 +19,7 @@ import (
 )
 
 type Redis struct {
-	conn        net.Conn
+	conn        *countingConn
 	reader      *bufio.Reader
 	writer      *bufio.Writer
 	protoReader *proto.Reader
@@ -47,10 +48,10 @@ func NewRedisClient(ctx context.Context, address string, username string, passwo
 		log.Panicf("dial failed. address=[%s], tls=[%v], attempts=[%d], err=[%v]", address, Tls, dialAttempts, err)
 	}
 
-	r.conn = conn
+	r.conn = &countingConn{Conn: conn}
 	// Increase the size of the underlying TCP send cache to avoid short-write errors
-	r.reader = bufio.NewReader(conn)
-	r.writer = bufio.NewWriterSize(conn, 32*1024) // size is 32KiB
+	r.reader = bufio.NewReader(r.conn)
+	r.writer = bufio.NewWriterSize(r.conn, 32*1024) // size is 32KiB
 	r.protoReader = proto.NewReader(r.reader)
 	r.protoWriter = proto.NewWriter(r.writer)
 
@@ -290,6 +291,23 @@ func (r *Redis) ReadByte() (byte, error) {
 
 func (r *Redis) ReadString(delim byte) (string, error) {
 	return r.reader.ReadString(delim)
+}
+
+// BytesRead returns the number of bytes received on the connection so far.
+func (r *Redis) BytesRead() int64 {
+	return r.conn.bytesRead.Load()
+}
+
+// countingConn counts bytes received on a connection.
+type countingConn struct {
+	net.Conn
+	bytesRead atomic.Int64
+}
+
+func (c *countingConn) Read(b []byte) (int, error) {
+	n, err := c.Conn.Read(b)
+	c.bytesRead.Add(int64(n))
+	return n, err
 }
 
 func (r *Redis) Close() {
