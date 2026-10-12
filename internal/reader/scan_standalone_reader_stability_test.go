@@ -162,6 +162,7 @@ func (p *idleKillingProxy) handle(down, up *net.TCPConn) {
 }
 
 type ksnReader struct {
+	reader   *scanStandaloneReader
 	entries  chan *entry.Entry
 	received atomic.Int64 // all entries, including those dropped from entries
 	stop     func()
@@ -180,7 +181,7 @@ func startKsnReader(t *testing.T, address string) *ksnReader {
 
 	r := NewScanStandaloneReader(ctx, opts)
 	chs := r.StartRead(ctx)
-	kr := &ksnReader{entries: make(chan *entry.Entry, 1024)}
+	kr := &ksnReader{reader: r.(*scanStandaloneReader), entries: make(chan *entry.Entry, 1024)}
 	finished := make(chan struct{})
 	go func() {
 		for e := range chs[0] {

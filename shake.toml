@@ -18,7 +18,7 @@ try_diskless = false       # Set to true for diskless sync if the source has rep
 #dbs = []                   # set you want to scan dbs such as [1,5,7], if you don't want to scan all
 #scan = true                # set to false if you don't want to scan keys
 #ksn = false                # set to true to enabled Redis keyspace notifications (KSN) subscription
-#count = 1                  # number of keys to scan per iteration
+#count = 1                  # number of keys to scan per iteration; applied without restart when the config file changes
 ## RedisShake uses the TYPE command to get each key's type.
 ## If the type is in this skip list, the key will be skipped.
 #skip_unknown_type = []  # e.g. ["imset", "mbloom", "string", "hash", "list", "set", "zset"]
