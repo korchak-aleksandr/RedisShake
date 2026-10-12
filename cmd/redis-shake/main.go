@@ -24,6 +24,7 @@ import (
 	"runtime"
 
 	"github.com/mcuadros/go-defaults"
+	"github.com/spf13/viper"
 )
 
 var (
@@ -115,6 +116,10 @@ func main() {
 			log.Infof("* tls: %v", opts.Tls)
 			theReader = reader.NewScanStandaloneReader(ctx, opts)
 		}
+		scanCountSetter := theReader.(reader.ScanCountSetter)
+		config.WatchConfig(os.Args[1], func(changed *viper.Viper) {
+			applyConfigChange(v, changed, scanCountSetter)
+		})
 	case v.IsSet("rdb_reader"):
 		opts := new(reader.RdbReaderOptions)
 		defaults.SetDefaults(opts)
@@ -287,6 +292,28 @@ Loop:
 	theWriter.Close()       // Wait for all writing operations to complete
 	utils.ReleaseFileLock() // Release file lock
 	log.Infof("all done")
+}
+
+// applyConfigChange applies scan_reader.count from the changed config file.
+// Other settings take effect only after a restart.
+func applyConfigChange(loaded, changed *viper.Viper, r reader.ScanCountSetter) {
+	opts := new(reader.ScanReaderOptions)
+	defaults.SetDefaults(opts)
+	if err := changed.UnmarshalKey("scan_reader", opts); err != nil {
+		log.Warnf("config file changed but failed to read the ScanReader config entry. err=[%v]", err)
+		return
+	}
+	r.SetScanCount(opts.Count)
+
+	restartRequired := make([]string, 0)
+	for _, key := range config.ChangedKeys(loaded, changed) {
+		if key != "scan_reader.count" {
+			restartRequired = append(restartRequired, key)
+		}
+	}
+	if len(restartRequired) > 0 {
+		log.Warnf("config changed, restart required to apply. fields=[%s]", strings.Join(restartRequired, ", "))
+	}
 }
 
 func waitShutdown(cancel context.CancelFunc) {

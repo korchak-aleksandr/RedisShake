@@ -5,9 +5,12 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"reflect"
 	"regexp"
+	"sort"
 	"strings"
 
+	"github.com/fsnotify/fsnotify"
 	"github.com/mcuadros/go-defaults"
 	"github.com/rs/zerolog"
 	"github.com/spf13/viper"
@@ -111,7 +114,7 @@ var Opt ShakeOptions
 func LoadConfig() *viper.Viper {
 	defaults.SetDefaults(&Opt)
 
-	v := viper.New()
+	var v *viper.Viper
 	if len(os.Args) > 2 {
 		fmt.Println("Usage: redis-shake [config file]")
 		fmt.Println("Example: ")
@@ -124,16 +127,8 @@ func LoadConfig() *viper.Viper {
 	// load config from file
 	if len(os.Args) == 2 {
 		logger.Info().Msgf("load config from file: %s", os.Args[1])
-		configFile := os.Args[1]
-		file, err := os.ReadFile(configFile)
-		if err != nil {
-			logger.Error().Msgf("failed to read config file: %v", err)
-			os.Exit(1)
-		}
-		fallback := envWithFallback(string(file))
-		v.SetConfigType("toml")
-		err = v.ReadConfig(bytes.NewReader([]byte(fallback)))
-		if err != nil {
+		var err error
+		if v, err = readConfig(os.Args[1]); err != nil {
 			logger.Error().Msgf("failed to read config file: %v", err)
 			os.Exit(1)
 		}
@@ -148,6 +143,66 @@ func LoadConfig() *viper.Viper {
 		panic(err)
 	}
 	return v
+}
+
+// readConfig reads a TOML config file, substituting environment variables.
+func readConfig(path string) (*viper.Viper, error) {
+	file, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	v := viper.New()
+	v.SetConfigType("toml")
+	if err := v.ReadConfig(bytes.NewReader([]byte(envWithFallback(string(file))))); err != nil {
+		return nil, err
+	}
+	return v, nil
+}
+
+// WatchConfig calls onChange with the reloaded config each time the content of the config file
+// changes, including when Kubernetes updates a mounted ConfigMap. A file that fails to parse is
+// logged and skipped.
+func WatchConfig(path string, onChange func(v *viper.Viper)) {
+	last, err := os.ReadFile(path)
+	if err != nil {
+		log.Warnf("config watch disabled, failed to read config file. path=[%s], err=[%v]", path, err)
+		return
+	}
+	w := viper.New()
+	w.SetConfigFile(path)
+	w.OnConfigChange(func(fsnotify.Event) {
+		content, err := os.ReadFile(path)
+		if err != nil || bytes.Equal(content, last) {
+			return
+		}
+		last = content
+		v, err := readConfig(path)
+		if err != nil {
+			log.Warnf("config file changed but failed to parse, keeping the current config. err=[%v]", err)
+			return
+		}
+		onChange(v)
+	})
+	w.WatchConfig()
+}
+
+// ChangedKeys returns the keys whose values differ between two configs, sorted.
+func ChangedKeys(old, new *viper.Viper) []string {
+	keys := make(map[string]struct{})
+	for _, k := range old.AllKeys() {
+		keys[k] = struct{}{}
+	}
+	for _, k := range new.AllKeys() {
+		keys[k] = struct{}{}
+	}
+	changed := make([]string, 0)
+	for k := range keys {
+		if !reflect.DeepEqual(old.Get(k), new.Get(k)) {
+			changed = append(changed, k)
+		}
+	}
+	sort.Strings(changed)
+	return changed
 }
 
 // Custom substitution function that returns as is if the environment variable is empty

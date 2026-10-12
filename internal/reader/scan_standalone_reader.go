@@ -65,6 +65,8 @@ type scanStandaloneReader struct {
 	scanClient      atomic.Pointer[client.Redis]
 	dumpClientStat  atomic.Pointer[client.Redis]
 
+	scanCount atomic.Int64 // COUNT of SCAN; may change while the scan is running
+
 	stat struct {
 		Name              string `json:"name"`
 		ScanFinished      bool   `json:"scan_finished"`
@@ -89,6 +91,7 @@ func NewScanStandaloneReader(ctx context.Context, opts *ScanReaderOptions) Reade
 	r.stat.Name = "reader_" + strings.Replace(opts.Address, ":", "_", -1)
 	r.needDumpQueue = utils.NewUniqueQueue(100000000)     // cache 100000000 keys
 	r.needRestoreChan = make(chan *needRestoreItem, 1024) // inflight 1024 keys
+	r.scanCount.Store(int64(opts.Count))
 	log.Infof("[%s] scanStandaloneReader init finished. dbs=[%v]", r.stat.Name, r.dbs)
 	return r
 }
@@ -249,7 +252,6 @@ func (r *scanStandaloneReader) scan() {
 		}
 
 		var cursor uint64 = 0
-		count := r.opts.Count
 		for {
 			select {
 			case <-r.ctx.Done():
@@ -260,7 +262,7 @@ func (r *scanStandaloneReader) scan() {
 			}
 
 			var keys []string
-			cursor, keys = c.Scan(cursor, count)
+			cursor, keys = c.Scan(cursor, int(r.scanCount.Load()))
 			for _, key := range keys {
 				r.needDumpQueue.Put(dbKey{dbId, key}) // pass value not pointer
 			}
@@ -432,11 +434,18 @@ func (r *scanStandaloneReader) restore() {
 
 func (r *scanStandaloneReader) Status() interface{} {
 	stat := r.stat
-	stat.ScanCount = int64(r.opts.Count)
+	stat.ScanCount = r.scanCount.Load()
 	stat.InBytes.Subscribe = bytesRead(&r.subscribeClient)
 	stat.InBytes.Scan = bytesRead(&r.scanClient)
 	stat.InBytes.Dump = bytesRead(&r.dumpClientStat)
 	return stat
+}
+
+// SetScanCount changes COUNT for the next SCAN calls, keeping the cursor.
+func (r *scanStandaloneReader) SetScanCount(count int) {
+	if old := r.scanCount.Swap(int64(count)); old != int64(count) {
+		log.Infof("[%s] scan count changed. old=[%d], new=[%d]", r.stat.Name, old, count)
+	}
 }
 
 // bytesRead returns the bytes received by the client, or 0 if it is not connected yet.
@@ -448,7 +457,7 @@ func bytesRead(c *atomic.Pointer[client.Redis]) int64 {
 }
 
 func (r *scanStandaloneReader) StatusString() string {
-	traffic := fmt.Sprintf("scan_count=[%d], in_bytes=[sub %s, scan %s, dump %s]", r.opts.Count,
+	traffic := fmt.Sprintf("scan_count=[%d], in_bytes=[sub %s, scan %s, dump %s]", r.scanCount.Load(),
 		humanize.IBytes(uint64(bytesRead(&r.subscribeClient))),
 		humanize.IBytes(uint64(bytesRead(&r.scanClient))),
 		humanize.IBytes(uint64(bytesRead(&r.dumpClientStat))))

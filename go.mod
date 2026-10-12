@@ -4,6 +4,7 @@ go 1.26
 
 require (
 	github.com/dustin/go-humanize v1.0.1
+	github.com/fsnotify/fsnotify v1.7.0
 	github.com/go-stack/stack v1.8.1
 	github.com/gofrs/flock v0.8.1
 	github.com/mcuadros/go-defaults v1.2.0
@@ -18,7 +19,6 @@ require (
 require (
 	github.com/benbjohnson/clock v1.3.0 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
-	github.com/fsnotify/fsnotify v1.7.0 // indirect
 	github.com/hashicorp/hcl v1.0.0 // indirect
 	github.com/magiconair/properties v1.8.7 // indirect
 	github.com/mattn/go-colorable v0.1.13 // indirect

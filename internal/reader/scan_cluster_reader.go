@@ -48,6 +48,12 @@ func (rd *scanClusterReader) StatusString() string {
 	return fmt.Sprintf("src-%d, %s", rd.statusId, rd.readers[rd.statusId].StatusString())
 }
 
+func (rd *scanClusterReader) SetScanCount(count int) {
+	for _, r := range rd.readers {
+		r.(ScanCountSetter).SetScanCount(count)
+	}
+}
+
 func (rd *scanClusterReader) StatusConsistent() bool {
 	for _, r := range rd.readers {
 		if !r.StatusConsistent() {
